@@ -15,7 +15,11 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QTimer>
 
+#include <algorithm>
+#include <chrono>
+#include <future>
 #include <exception>
 #include <utility>
 #include <vector>
@@ -84,46 +88,126 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(reset_button_, &QPushButton::clicked, this, &MainWindow::reset_application);
     connect(exit_button_, &QPushButton::clicked, this, &MainWindow::exit_application);
 
+    // Poll completion without blocking Qt's event loop.
+    build_timer_ = new QTimer(this);
+    build_timer_->setInterval(25);
+    connect(build_timer_, &QTimer::timeout, this, &MainWindow::check_build_completion);
+
     update_action_states();
+}
+
+MainWindow::~MainWindow() {
+    build_timer_->stop();
+    if (build_thread_.joinable()) build_thread_.join();
 }
 
 void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
     exit_callback_ = callback;
 }
 
+// The dialog and IPC server can both use this file-add operation.
+// A rejected file must not change the workspace or the corpus state.
+bool MainWindow::add_document_file(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+
+    const QByteArray bytes = file.readAll();
+    if (file.error() != QFileDevice::NoError) return false;
+
+    const QFileInfo info(path);
+    const QString content = QString::fromUtf8(bytes);
+    workspace_.add_document(Document(info.absoluteFilePath().toStdString(), info.fileName().toStdString(), content.toStdString()));
+    workspace_widget_->add_document(info.fileName());
+    workspace_revision_++;
+    invalidate_corpus();
+    status_label_->setText("Document added: " + info.fileName());
+    return true;
+}
+
+void MainWindow::set_build_delay_ms(int ms_per_document) {
+    build_delay_ms_ = std::max(0, ms_per_document);
+}
+
 // Loads a selected text file and invalidates any previously built corpus.
 void MainWindow::add_document() {
     const QString path = QFileDialog::getOpenFileName(this, "Add Document", QString(), "Text Files (*.txt);;All Files (*)");
     if (path.isEmpty()) return;
-
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
+    if (!add_document_file(path)) {
         QMessageBox::warning(this, "File Error", "Could not open the selected file.");
-        return;
     }
-
-    const QString text = QString::fromUtf8(file.readAll());
-    const QFileInfo info(path);
-    workspace_.add_document(Document(info.absoluteFilePath().toStdString(), info.fileName().toStdString(), text.toStdString()));
-    workspace_widget_->add_document(info.fileName());
-    invalidate_corpus();
-    status_label_->setText("Document added: " + info.fileName());
 }
 
-// Rebulds the processing backend using the current documents.
+// Copies the workspace on the GUI thread; only the copy goes to the worker.
 void MainWindow::build_corpus() {
-    if (workspace_.documents().empty()) return;
+    if (building_ || workspace_.documents().empty()) return;
+
+    Workspace snapshot = workspace_;
+    build_revision_ = workspace_revision_;
+    const int delay = build_delay_ms_;
+    std::promise<ProcessingCore> promise;
+    build_future_ = promise.get_future();
+
+    // Any completed previous worker must be joined before the thread object
+    // is assigned a new thread. No worker touches GUI widgets or workspace_.
+    if (build_thread_.joinable()) build_thread_.join();
+    build_thread_ = std::thread(
+        [snapshot = std::move(snapshot), delay, promise = std::move(promise)]() mutable {
+            try {
+                // Simulates expensive per document work inside the worker.
+                for (std::size_t i = 0; i < snapshot.documents().size(); ++i) {
+                    if (delay > 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                }
+                ProcessingCore result;
+                result.rebuild(snapshot);
+                promise.set_value(std::move(result));
+            } catch (...) {
+                promise.set_exception(std::current_exception());
+            }
+        });
+
+    building_ = true;
+    invalidate_corpus();
+    status_label_->setText("Building corpus...");
+    workspace_widget_->set_corpus_status("Corpus: Building");
+    update_action_states();
+    build_timer_->start();
+}
+
+void MainWindow::check_build_completion() {
+    if (!building_ || !build_future_.valid() ||
+        build_future_.wait_for(std::chrono::milliseconds(0)) !=
+            std::future_status::ready) return;
+
+    build_timer_->stop();
+    if (build_thread_.joinable()) build_thread_.join();
 
     try {
-        processing_core_.rebuild(workspace_);
+        ProcessingCore result = build_future_.get();
+        building_ = false;
+#ifndef AIWS_FAULT_ACCEPT_STALE
+        if (build_revision_ != workspace_revision_) {
+            invalidate_corpus();
+            status_label_->setText("Build discarded: Workspace changed.");
+            return;
+        }
+#endif
+        processing_core_ = std::move(result);
         corpus_current_ = true;
         clear_processing_outputs();
-        workspace_widget_->set_corpus_status(QString("Corpus: %1 chunks").arg(processing_core_.chunk_count()));
+        workspace_widget_->set_corpus_status(
+            QString("Corpus: %1 chunks").arg(processing_core_.chunk_count()));
         status_label_->setText("Corpus built.");
         update_action_states();
     } catch (const std::exception& e) {
+#ifdef AIWS_FAULT_LOSE_FAILURE
+        // Fault injection: failure is not reported and state stays Building.
+        return;
+#else
+        building_ = false;
         invalidate_corpus();
-        QMessageBox::warning(this, "Build Error", QString::fromUtf8(e.what()));
+        status_label_->setText("Build failed: " + QString::fromUtf8(e.what()));
+#endif
     }
 }
 
@@ -203,12 +287,18 @@ void MainWindow::term_inspection_requested(const QString& term,
 
 // Resets all GUI components through their shared resettable interface.
 void MainWindow::reset_application() {
+    // Invalidates any background build started before Reset.
+    workspace_revision_++;
+
     workspace_.clear();
     corpus_current_ = false;
-    std::vector<Resettable*> components = {
-        workspace_widget_, search_widget_, term_inspector_widget_, context_widget_
-    };
-    for (Resettable* component : components) component->reset();
+
+    std::vector<Resettable*> components = {workspace_widget_, search_widget_, term_inspector_widget_, context_widget_};
+
+    for (Resettable* component : components) {
+        component->reset();
+    }
+
     update_action_states();
     status_label_->setText("Application reset.");
 }
@@ -219,7 +309,7 @@ void MainWindow::exit_application() {
 
 // Enables processing buttons only when their prerequisites are met.
 void MainWindow::update_action_states() {
-    workspace_widget_->set_build_corpus_enabled(!workspace_.documents().empty());
+    workspace_widget_->set_build_corpus_enabled(!workspace_.documents().empty() && !building_);
     const bool can_process = corpus_current_ && search_widget_->has_query();
     search_widget_->set_search_enabled(can_process);
     context_widget_->set_build_context_enabled(can_process);

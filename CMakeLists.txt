@@ -29,12 +29,14 @@ target_compile_options(aiws_m2 PRIVATE -Wall -Wextra -Wpedantic)
 # Everything except main(), so tests can link the application code.
 add_library(aiws_app STATIC
     src/main_window.cpp
+    src/ipc_server.cpp
     src/workspace_widget.cpp
     src/search_widget.cpp
     src/context_widget.cpp
     src/term_inspector_widget.cpp
     src/search_result_model.cpp
     include/aiws/gui/main_window.hpp
+    include/aiws/gui/ipc_server.hpp
     include/aiws/gui/resettable.hpp
     include/aiws/gui/workspace_widget.hpp
     include/aiws/gui/search_widget.hpp
@@ -49,6 +51,13 @@ target_compile_options(aiws_app PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(ai_workspace_m4 src/main.cpp)
 target_link_libraries(ai_workspace_m4 PRIVATE aiws_app)
 target_compile_options(ai_workspace_m4 PRIVATE -Wall -Wextra -Wpedantic)
+
+# CR-1: Command-line program for adding documents remotely.
+add_executable(aiws_send
+               tools/aiws_send.cpp)
+
+target_link_libraries(aiws_send PRIVATE Threads::Threads)
+target_compile_options(aiws_send PRIVATE -Wall -Wextra -Wpedantic)
 
 enable_testing()
 add_executable(student_tests tests/student_tests.cpp)

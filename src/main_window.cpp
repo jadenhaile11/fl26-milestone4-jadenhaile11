@@ -27,8 +27,7 @@
 namespace aiws::gui {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    // TODO: Construct the M3 application window, compose the GUI components,
-    // establish layouts/presentation, connect events, and establish initial state.
+
     setWindowTitle("AI Workspace");
     resize(900, 900);
 
@@ -174,6 +173,7 @@ void MainWindow::build_corpus() {
     build_timer_->start();
 }
 
+// Checks if the background build is finished without freezing the GUI.
 void MainWindow::check_build_completion() {
     if (!building_ || !build_future_.valid() ||
         build_future_.wait_for(std::chrono::milliseconds(0)) !=
@@ -185,6 +185,7 @@ void MainWindow::check_build_completion() {
     try {
         ProcessingCore result = build_future_.get();
         building_ = false;
+// Discards the completed build if the workspace changed while building.
 #ifndef AIWS_FAULT_ACCEPT_STALE
         if (build_revision_ != workspace_revision_) {
             invalidate_corpus();
@@ -192,6 +193,7 @@ void MainWindow::check_build_completion() {
             return;
         }
 #endif
+        // Saves the completed corpus and makes search features available.
         processing_core_ = std::move(result);
         corpus_current_ = true;
         clear_processing_outputs();

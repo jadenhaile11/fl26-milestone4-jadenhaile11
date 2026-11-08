@@ -2,6 +2,10 @@
 
 #include <QMainWindow>
 
+#include <cstdint>
+#include <future>
+#include <thread>
+
 #include "aiws/processing_core.hpp"
 #include "aiws/workspace.hpp"
 
@@ -9,6 +13,7 @@ class QLabel;
 class QPushButton;
 class QString;
 class QWidget;
+class QTimer;
 
 namespace aiws::gui {
 
@@ -43,6 +48,9 @@ public:
      * @param parent Optional Qt parent widget.
      */
     explicit MainWindow(QWidget* parent = nullptr);
+
+    // Makes sure the background worker finishes before destruction.
+    ~MainWindow() override;
 
     /**
      * @brief Registers the callback invoked when the user requests Exit.
@@ -123,6 +131,9 @@ private slots:
      */
     void exit_application();
 
+    // Checks whether the background has finished.
+    void check_build_completion();
+
 private:
     /**
      * @brief Updates availability of actions that depend on current application state.
@@ -146,6 +157,18 @@ private:
     ProcessingCore processing_core_;
     bool corpus_current_{false};
     ExitCallback exit_callback_{nullptr};
+
+    // M4 background build management.
+    std::thread build_thread_;
+    std::future<ProcessingCore> build_future_;
+    QTimer* build_timer_{nullptr};
+
+    bool building_{false};
+    int build_delay_ms_{0};
+
+    // Tracks workspace changes to reject outdated builds.
+    std::uint64_t workspace_revision_{0};
+    std::uint64_t build_revision_{0};
 
     WorkspaceWidget* workspace_widget_{nullptr};
     SearchWidget* search_widget_{nullptr};

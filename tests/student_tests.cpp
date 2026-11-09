@@ -133,7 +133,7 @@ private slots:
 
         QVERIFY(start_build(window));
 
-        // Change the workspace before the build completes.
+        // Changes the workspace before the build completes.
         QVERIFY(window.add_document_file(second));
 
         QTRY_VERIFY_WITH_TIMEOUT(application_status(window).contains("discarded"), 3000);

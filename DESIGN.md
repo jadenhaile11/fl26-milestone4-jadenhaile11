@@ -29,3 +29,10 @@ All 8 normal test results passed and both fault switches caused the expected tes
 
 6. AI-Use Disclosure
 I used AI, ChatGPT, to help me better understand requirements and how to implement certain parts of the project. It helped with threading concepts, background corpus building, and how they work together. I used it on files such as `main_window.cpp`, `ipc_server.cpp`, and `main.cpp` for figuring out how to approach the edits or formulation of the files. It also helped with developing test cases for the `student_tests.cpp` file, especially for checking stale builds and failed builds as this is not my strongest skill. I reviewed the suggested code snippets, made necessary changes, and tested everything in WSL Ubuntu. Overall, AI definitely helped with understanding implementation and why certain changes were necessary.
+
+7. Pair Programming Log
+- Partner: Connor Zarra
+- Date: November 8th, 6pm-7pm (Both our codes)
+- During our session, we discussed how Remote Add should work the same way as adding a document normally through the GUI. We agreed that both methods should use `MainWindow::add_document_file()` so they follow the same process and invalidate the current corpus when the workspace changes.
+- Swapped roles every 15 minutes 
+- Communication after a code change was great because it allowed for the both of to see each other's thought processes without being judgemental of the other.

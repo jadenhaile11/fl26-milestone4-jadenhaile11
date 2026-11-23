@@ -281,26 +281,32 @@ void MainWindow::worker_loop() {
         // Records the cancellation generation for this build.
         const auto epoch = request->epoch;
 
+        #ifndef AIWS_FAULT_NO_CANCEL
         if (cancellation_epoch_.load() != epoch) {
             continue;
         }
+        #endif
 
         try {
             // Simulates processing time for each document.
             for (std::size_t i = 0; i < request->snapshot.documents().size(); i++) {
 
+            #ifndef AIWS_FAULT_NO_CANCEL
                 if (cancellation_epoch_.load() != epoch) {
                     break;
                 }
-
+            #endif
+            
                 if (request->delay_ms > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(request->delay_ms));
                 }
             }
 
+            #ifndef AIWS_FAULT_NO_CANCEL
             if (cancellation_epoch_.load() != epoch) {
                 continue;
             }
+            #endif
 
             ProcessingCore result;
             result.rebuild(request->snapshot);

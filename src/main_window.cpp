@@ -26,6 +26,145 @@
 
 namespace aiws::gui {
 
+// State when the workspace has no documents.
+class MainWindow::EmptyState final : public MainWindow::CorpusState {
+public:
+    bool can_build() const override {return false;}
+    bool can_process() const override {return false;}
+
+    void request_build(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset(MainWindow& window) override;
+    void build_succeeded(MainWindow& window) override;
+    void build_failed(MainWindow& window) override;
+};
+
+// State when documents exist but the corpus is not current.
+class MainWindow::DirtyState final : public MainWindow::CorpusState {
+public:
+    bool can_build() const override {return true;}
+    bool can_process() const override {return false;}
+
+    void request_build(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset(MainWindow& window) override;
+    void build_succeeded(MainWindow& window) override;
+    void build_failed(MainWindow& window) override;
+};
+
+// State when a corpus build is currently running.
+class MainWindow::BuildingState final : public MainWindow::CorpusState {
+public:
+    bool can_build() const override {return false;}
+    bool can_process() const override {return false;}
+
+    void request_build(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset(MainWindow& window) override;
+    void build_succeeded(MainWindow& window) override;
+    void build_failed(MainWindow& window) override;
+};
+
+// State when the corpus matches the current workspace.
+class MainWindow::ReadyState final : public MainWindow::CorpusState {
+public:
+    bool can_build() const override {return true;}
+    bool can_process() const override {return true;}  
+
+    void request_build(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset(MainWindow& window) override;
+    void build_succeeded(MainWindow& window) override;
+    void build_failed(MainWindow& window) override;
+};
+
+// Replaces the current corpus state.
+void MainWindow::set_corpus_state(std::unique_ptr<CorpusState> state) {
+    corpus_state_ = std::move(state);
+}
+
+// Sends an event to the current state.
+void MainWindow::dispatch_state_event(void(CorpusState::*event)(MainWindow&)) {
+    auto previous_state = std::move(corpus_state_);
+
+    // The state decides which transition should happen.
+    (previous_state.get()->*event)(*this);
+
+    // Keeps the original state if no transition happened.
+    if (!corpus_state_) {
+        corpus_state_ = std::move(previous_state);
+    }
+}
+
+// EmptyState: No documents exist.
+void MainWindow::EmptyState::request_build(MainWindow&) {}
+
+void MainWindow::EmptyState::workspace_changed(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<DirtyState>());
+}
+
+void MainWindow::EmptyState::reset(MainWindow&) {}
+
+void MainWindow::EmptyState::build_succeeded(MainWindow&) {}
+
+void MainWindow::EmptyState::build_failed(MainWindow&) {}
+
+// DirtyState: Documents exist but the corpus is outdated.
+void MainWindow::DirtyState::request_build(MainWindow& window) {
+    window.start_build_request();
+    window.set_corpus_state(std::make_unique<BuildingState>());
+    window.update_action_states();
+}
+
+void MainWindow::DirtyState::workspace_changed(MainWindow&) {}
+
+void MainWindow::DirtyState::reset(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<EmptyState>());
+}
+
+void MainWindow::DirtyState::build_succeeded(MainWindow&) {}
+
+void MainWindow::DirtyState::build_failed(MainWindow&) {}
+
+// BuildingState: A corpus build is in progress.
+void MainWindow::BuildingState::request_build(MainWindow&) {}
+
+void MainWindow::BuildingState::workspace_changed(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<DirtyState>());
+}
+
+void MainWindow::BuildingState::reset(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<EmptyState>());
+}
+
+void MainWindow::BuildingState::build_succeeded(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<ReadyState>());
+}
+
+void MainWindow::BuildingState::build_failed(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<DirtyState>());
+}
+
+// ReadyState: The corpus matches the current Workspace.
+void MainWindow::ReadyState::request_build(MainWindow& window) {
+    window.start_build_request();
+    window.set_corpus_state(std::make_unique<BuildingState>());
+    window.update_action_states();
+}
+
+void MainWindow::ReadyState::workspace_changed(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<DirtyState>());
+}
+
+void MainWindow::ReadyState::reset(MainWindow& window) {
+    window.set_corpus_state(std::make_unique<EmptyState>());
+}
+
+void MainWindow::ReadyState::build_succeeded(MainWindow&) {}
+
+void MainWindow::ReadyState::build_failed(MainWindow&) {}
+
+// Constructor
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     setWindowTitle("AI Workspace");
@@ -86,6 +225,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(context_widget_, &ContextWidget::build_context_requested, this, &MainWindow::build_context_requested);
     connect(reset_button_, &QPushButton::clicked, this, &MainWindow::reset_application);
     connect(exit_button_, &QPushButton::clicked, this, &MainWindow::exit_application);
+
+    // The application starts with an empty workspace.
+    corpus_state_ = std::make_unique<EmptyState>();
 
     update_action_states();
 
@@ -230,7 +372,12 @@ bool MainWindow::add_document_file(const QString& path) {
 
     // Allows the user to request a new build.
     building_ = false;
+
+    // Let the current state handle the Workspace change.
+    dispatch_state_event(&CorpusState::workspace_changed);
+
     invalidate_corpus();
+    update_action_states();
 
     status_label_->setText("Document added: " + info.fileName());
     return true;
@@ -249,9 +396,13 @@ void MainWindow::add_document() {
     }
 }
 
-// Copies the workspace on the GUI thread; only the copy goes to the worker.
+// Lets the current state decide how to handle Build Corpus.
 void MainWindow::build_corpus() {
-    if (building_ || workspace_.documents().empty()) return;
+    dispatch_state_event(&CorpusState::request_build);
+}
+
+// Copies the workspace on the GUI thread; only the copy goes to the worker.
+void MainWindow::start_build_request() {
 
     Workspace snapshot = workspace_;
     build_revision_ = workspace_revision_;
@@ -278,7 +429,6 @@ void MainWindow::build_corpus() {
     invalidate_corpus();
     status_label_->setText("Building corpus...");
     workspace_widget_->set_corpus_status("Corpus: Building");
-    update_action_states();
 }
 
 // Checks if the background build is finished without freezing the GUI.
@@ -308,11 +458,14 @@ void MainWindow::check_build_completion() {
         // Saves the completed corpus and makes search features available.
         processing_core_ = std::move(result);
         corpus_current_ = true;
+        dispatch_state_event(&CorpusState::build_succeeded);
         clear_processing_outputs();
+
         workspace_widget_->set_corpus_status(
             QString("Corpus: %1 chunks").arg(processing_core_.chunk_count()));
         status_label_->setText("Corpus built.");
         update_action_states();
+
     } catch (const std::exception& e) {
         building_ = false;
 
@@ -325,6 +478,7 @@ void MainWindow::check_build_completion() {
         }
 
         invalidate_corpus();
+        dispatch_state_event(&CorpusState::build_failed);
         status_label_->setText("Build failed: " + QString::fromUtf8(e.what()));
         update_action_states();
     }
@@ -420,6 +574,9 @@ void MainWindow::reset_application() {
     building_ = false;
     corpus_current_ = false;
 
+    // Reset the corpus lifecycle to EmptyState.
+    dispatch_state_event(&CorpusState::reset);
+
     std::vector<Resettable*> components = {workspace_widget_, search_widget_, term_inspector_widget_, context_widget_};
 
     for (Resettable* component : components) {
@@ -436,11 +593,14 @@ void MainWindow::exit_application() {
 
 // Enables processing buttons only when their prerequisites are met.
 void MainWindow::update_action_states() {
-    workspace_widget_->set_build_corpus_enabled(!workspace_.documents().empty() && !building_);
-    const bool can_process = corpus_current_ && search_widget_->has_query();
+    const bool can_build = corpus_state_->can_build();
+    const bool corpus_ready = corpus_state_->can_process();
+    const bool can_process = corpus_ready && search_widget_->has_query();
+
+    workspace_widget_->set_build_corpus_enabled(can_build);
     search_widget_->set_search_enabled(can_process);
     context_widget_->set_build_context_enabled(can_process);
-    term_inspector_widget_->set_inspection_enabled(corpus_current_);
+    term_inspector_widget_->set_inspection_enabled(corpus_ready);
 }
 
 // A workspace change makes old search results and context invalid.
@@ -448,7 +608,6 @@ void MainWindow::invalidate_corpus() {
     corpus_current_ = false;
     workspace_widget_->set_corpus_status("Corpus: Not built");
     clear_processing_outputs();
-    update_action_states();
 }
 
 void MainWindow::clear_processing_outputs() {

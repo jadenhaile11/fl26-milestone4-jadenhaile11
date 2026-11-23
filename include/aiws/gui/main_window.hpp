@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <optional>
+#include <memory>
 
 #include "aiws/processing_core.hpp"
 #include "aiws/workspace.hpp"
@@ -138,6 +139,33 @@ private slots:
     void check_build_completion();
 
 private:
+    // Base class for the corpus lifecycle State pattern.
+    class CorpusState {
+    public:
+        virtual ~CorpusState() = default;
+
+        virtual bool can_build() const = 0;
+        virtual bool can_process() const = 0;
+
+        virtual void request_build(MainWindow& window) = 0;
+        virtual void workspace_changed(MainWindow& window) = 0;
+        virtual void reset(MainWindow& window) = 0;
+        virtual void build_succeeded(MainWindow& window) = 0;
+        virtual void build_failed(MainWindow& window) = 0;
+    };
+
+    // Concrete corpus lifecycle states.
+    class EmptyState;
+    class DirtyState;
+    class BuildingState;
+    class ReadyState;
+
+    // Changes the current corpus state on the GUI thread.
+    void set_corpus_state(std::unique_ptr<CorpusState> state);
+
+    // Delivers an event without destroying the active state mid-call.
+    void dispatch_state_event(void (CorpusState::*event)(MainWindow&));
+
     /**
      * @brief Updates availability of actions that depend on current application state.
      */
@@ -160,9 +188,16 @@ private:
     // Waits for build requests and processes them one at a time.
     void worker_loop();
 
+    // Submits a build request after the current state permits it.
+    void start_build_request();
+
     Workspace workspace_;
     ProcessingCore processing_core_;
     bool corpus_current_{false};
+
+    // Current corpus lifecycle state, owned by MainWindow.
+    std::unique_ptr<CorpusState> corpus_state_;
+
     ExitCallback exit_callback_{nullptr};
 
     // A build request sent from the GUI to the worker.

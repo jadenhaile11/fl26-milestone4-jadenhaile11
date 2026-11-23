@@ -17,7 +17,6 @@ class QLabel;
 class QPushButton;
 class QString;
 class QWidget;
-class QTimer;
 
 namespace aiws::gui {
 
@@ -187,9 +186,8 @@ private:
     // Changes whenever running work becomes outdated.
     std::atomic<std::uint64_t> cancellation_epoch_{0};
 
-    // Existing M4 completion handling.
+    // Receives the result of a background build.
     std::future<ProcessingCore> build_future_;
-    QTimer* build_timer_{nullptr};
 
     bool building_{false};
     int build_delay_ms_{0};

@@ -15,7 +15,7 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QTimer>
+#include <QMetaObject>
 
 #include <algorithm>
 #include <chrono>
@@ -87,11 +87,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(reset_button_, &QPushButton::clicked, this, &MainWindow::reset_application);
     connect(exit_button_, &QPushButton::clicked, this, &MainWindow::exit_application);
 
-    // Poll completion without blocking Qt's event loop.
-    build_timer_ = new QTimer(this);
-    build_timer_->setInterval(25);
-    connect(build_timer_, &QTimer::timeout, this, &MainWindow::check_build_completion);
-
     update_action_states();
 
     // M5: Start one persistent worker thread.
@@ -101,7 +96,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 // Destructor
 MainWindow::~MainWindow() {
-    build_timer_->stop();
 
     // Tells the worker to cancel its current build.
     cancellation_epoch_.fetch_add(1);
@@ -174,10 +168,12 @@ void MainWindow::worker_loop() {
             }
 
             request->promise.set_value(std::move(result));
+            QMetaObject::invokeMethod(this, "check_build_completion", Qt::QueuedConnection);
 
         } catch (...) {
             if (cancellation_epoch_.load() == epoch) {
                 request->promise.set_exception(std::current_exception());
+                QMetaObject::invokeMethod(this, "check_build_completion", Qt::QueuedConnection);
             }
         }
     }
@@ -200,8 +196,21 @@ bool MainWindow::add_document_file(const QString& path) {
     const QString content = QString::fromUtf8(bytes);
     workspace_.add_document(Document(info.absoluteFilePath().toStdString(), info.fileName().toStdString(), content.toStdString()));
     workspace_widget_->add_document(info.fileName());
+
+    // Marks the workspace as changed and cancels outdated builds.
     workspace_revision_++;
+    cancellation_epoch_.fetch_add(1);
+
+    // Removes any request that has not started.
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        pending_request_.reset();
+    }
+
+    // Allows the user to request a new build.
+    building_ = false;
     invalidate_corpus();
+
     status_label_->setText("Document added: " + info.fileName());
     return true;
 }
@@ -226,44 +235,42 @@ void MainWindow::build_corpus() {
     Workspace snapshot = workspace_;
     build_revision_ = workspace_revision_;
     const int delay = build_delay_ms_;
-    std::promise<ProcessingCore> promise;
-    build_future_ = promise.get_future();
 
-    // Any completed previous worker must be joined before the thread object
-    // is assigned a new thread. No worker touches GUI widgets or workspace_.
-    if (build_thread_.joinable()) build_thread_.join();
-    build_thread_ = std::thread(
-        [snapshot = std::move(snapshot), delay, promise = std::move(promise)]() mutable {
-            try {
-                // Simulates expensive per document work inside the worker.
-                for (std::size_t i = 0; i < snapshot.documents().size(); ++i) {
-                    if (delay > 0)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                }
-                ProcessingCore result;
-                result.rebuild(snapshot);
-                promise.set_value(std::move(result));
-            } catch (...) {
-                promise.set_exception(std::current_exception());
-            }
-        });
+    // Creates a request with the current cancellation generation.
+    BuildRequest request;
+    request.snapshot = std::move(snapshot);
+    request.delay_ms = delay;
+    request.revision = build_revision_;
+    request.epoch = cancellation_epoch_.load();
+
+    build_future_ = request.promise.get_future();
+
+    // Hands off the request without waiting for the worker.
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        pending_request_ = std::move(request);
+    }
+
+    worker_cv_.notify_one();
 
     building_ = true;
     invalidate_corpus();
     status_label_->setText("Building corpus...");
     workspace_widget_->set_corpus_status("Corpus: Building");
     update_action_states();
-    build_timer_->start();
 }
 
 // Checks if the background build is finished without freezing the GUI.
 void MainWindow::check_build_completion() {
-    if (!building_ || !build_future_.valid() ||
-        build_future_.wait_for(std::chrono::milliseconds(0)) !=
-            std::future_status::ready) return;
+    // Ignores notifications when no build is active.
+    if (!building_ || !build_future_.valid()) {
+        return;
+    }
 
-    build_timer_->stop();
-    if (build_thread_.joinable()) build_thread_.join();
+    // Never blocks the GUI waiting for a result.
+    if (build_future_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return;
+    }
 
     try {
         ProcessingCore result = build_future_.get();
@@ -376,12 +383,20 @@ void MainWindow::term_inspection_requested(const QString& term,
     }
 }
 
-// Resets all GUI components through their shared resettable interface.
+// Resets all GUI components and cancels outdated background work.
 void MainWindow::reset_application() {
-    // Invalidates any background build started before Reset.
+    // Invalidates the current workspace and any running build.
     workspace_revision_++;
+    cancellation_epoch_.fetch_add(1);
+
+    // Removes any build request that has not started.
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        pending_request_.reset();
+    }
 
     workspace_.clear();
+    building_ = false;
     corpus_current_ = false;
 
     std::vector<Resettable*> components = {workspace_widget_, search_widget_, term_inspector_widget_, context_widget_};

@@ -168,12 +168,33 @@ void MainWindow::worker_loop() {
             }
 
             request->promise.set_value(std::move(result));
-            QMetaObject::invokeMethod(this, "check_build_completion", Qt::QueuedConnection);
+
+            // Notifies the GUI only if this build is still current.
+            const auto revision = request->revision;
+
+            QMetaObject::invokeMethod(this, [this, epoch, revision]() {
+                if (cancellation_epoch_.load() != epoch || build_revision_ != revision) {
+                    return;
+                }
+
+                check_build_completion();
+
+            }, Qt::QueuedConnection);
 
         } catch (...) {
             if (cancellation_epoch_.load() == epoch) {
                 request->promise.set_exception(std::current_exception());
-                QMetaObject::invokeMethod(this, "check_build_completion", Qt::QueuedConnection);
+
+                const auto revision = request->revision;
+
+                QMetaObject::invokeMethod(this, [this, epoch, revision] () {
+                    if (cancellation_epoch_.load() != epoch || build_revision_ != revision) {
+                        return;
+                    }
+
+                    check_build_completion();
+
+                }, Qt::QueuedConnection);
             }
         }
     }

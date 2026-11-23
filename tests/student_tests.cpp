@@ -48,7 +48,11 @@ private:
     // Finds the status message at the bottom of MainWindow.
     QString application_status(MainWindow& window) {
         for (QLabel* label : window.findChildren<QLabel*>()) {
-            if (label->text().startsWith("Build ") || label->text() == "Building corpus...") {return label->text();}
+            const QString text = label->text();
+
+            if (text.startsWith("Build") || text == "Building corpus..." || text == "Application reset.") {
+                return text;
+            }
         }
 
         return QString();
@@ -136,8 +140,10 @@ private slots:
         // Changes the workspace before the build completes.
         QVERIFY(window.add_document_file(second));
 
-        QTRY_VERIFY_WITH_TIMEOUT(application_status(window).contains("discarded"), 3000);
+        // Confirms the old build never becomes the current corpus.
+        QTest::qWait(600);
         QVERIFY(!corpus_status(window).contains("chunks"));
+        QVERIFY(!application_status(window).contains("Corpus built"));
     }
 
     // Resets need to invalidate a build started before Reset
@@ -168,8 +174,11 @@ private slots:
         QVERIFY(reset != nullptr);
         reset->click();
 
-        QTRY_VERIFY_WITH_TIMEOUT(application_status(window).contains("discarded"), 3000);
+        // Confirms Reset keeps the corpus invalid.
+        QTest::qWait(600);
         QVERIFY(!corpus_status(window).contains("chunks"));
+
+        QVERIFY(application_status(window).contains("Application reset"));
     }
 
     // A failed build must leave the Building state.

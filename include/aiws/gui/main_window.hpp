@@ -171,6 +171,7 @@ private:
         Workspace snapshot;
         int delay_ms{0};
         std::uint64_t revision{0};
+        std::uint64_t epoch{0};
         std::promise<ProcessingCore> promise;
     };
 

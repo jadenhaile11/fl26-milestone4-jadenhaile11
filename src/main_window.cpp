@@ -99,6 +99,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     build_thread_ = std::thread(&MainWindow::worker_loop, this);
 }
 
+// Destructor
 MainWindow::~MainWindow() {
     build_timer_->stop();
 
@@ -117,6 +118,68 @@ MainWindow::~MainWindow() {
     // Waits for the worker to finish before destroying MainWindow.
     if (build_thread_.joinable()) {
         build_thread_.join();
+    }
+}
+
+// Persistent worker that waits for and processes build requests.
+void MainWindow::worker_loop() {
+    while (true) {
+        std::optional<BuildRequest> request;
+
+        {
+            std::unique_lock<std::mutex> lock(worker_mutex_);
+
+            // Sleeps until a request arrives or shutdown is requested.
+            worker_cv_.wait(lock, [this] {
+                return stop_worker_ || pending_request_.has_value();
+            });
+
+            if (stop_worker_) {
+                return;
+            }
+
+            request = std::move(pending_request_);
+            pending_request_.reset();
+        }
+
+        // Records the cancellation generation for this build.
+        const auto epoch = request->epoch;
+
+        if (cancellation_epoch_.load() != epoch) {
+            continue;
+        }
+
+        try {
+            // Simulates processing time for each document.
+            for (std::size_t i = 0; i < request->snapshot.documents().size(); i++) {
+
+                if (cancellation_epoch_.load() != epoch) {
+                    break;
+                }
+
+                if (request->delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(request->delay_ms));
+                }
+            }
+
+            if (cancellation_epoch_.load() != epoch) {
+                continue;
+            }
+
+            ProcessingCore result;
+            result.rebuild(request->snapshot);
+
+            if (cancellation_epoch_.load() != epoch) {
+                continue;
+            }
+
+            request->promise.set_value(std::move(result));
+
+        } catch (...) {
+            if (cancellation_epoch_.load() == epoch) {
+                request->promise.set_exception(std::current_exception());
+            }
+        }
     }
 }
 

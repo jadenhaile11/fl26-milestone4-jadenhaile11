@@ -93,11 +93,31 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(build_timer_, &QTimer::timeout, this, &MainWindow::check_build_completion);
 
     update_action_states();
+
+    // M5: Start one persistent worker thread.
+    // Waits for build requests using a condition variable.
+    build_thread_ = std::thread(&MainWindow::worker_loop, this);
 }
 
 MainWindow::~MainWindow() {
     build_timer_->stop();
-    if (build_thread_.joinable()) build_thread_.join();
+
+    // Tells the worker to cancel its current build.
+    cancellation_epoch_.fetch_add(1);
+
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        stop_worker_ = true;
+        pending_request_.reset();
+    }
+
+    // Wakes up the worker if it is waiting for work.
+    worker_cv_.notify_one();
+
+    // Waits for the worker to finish before destroying MainWindow.
+    if (build_thread_.joinable()) {
+        build_thread_.join();
+    }
 }
 
 void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
@@ -185,14 +205,15 @@ void MainWindow::check_build_completion() {
     try {
         ProcessingCore result = build_future_.get();
         building_ = false;
-// Discards the completed build if the workspace changed while building.
-#ifndef AIWS_FAULT_ACCEPT_STALE
+
+        // Discards the completed build if the workspace changed while building.
         if (build_revision_ != workspace_revision_) {
             invalidate_corpus();
             status_label_->setText("Build discarded: Workspace changed.");
+            update_action_states();
             return;
         }
-#endif
+        
         // Saves the completed corpus and makes search features available.
         processing_core_ = std::move(result);
         corpus_current_ = true;
@@ -202,14 +223,19 @@ void MainWindow::check_build_completion() {
         status_label_->setText("Corpus built.");
         update_action_states();
     } catch (const std::exception& e) {
-#ifdef AIWS_FAULT_LOSE_FAILURE
-        // Fault injection: failure is not reported and state stays Building.
-        return;
-#else
         building_ = false;
+
+        // Ignores failures from builds for an older workspace revision.
+        if (build_revision_ != workspace_revision_) {
+            invalidate_corpus();
+            status_label_->setText("Build discarded: Workspace changed.");
+            update_action_states();
+            return;
+        }
+
         invalidate_corpus();
         status_label_->setText("Build failed: " + QString::fromUtf8(e.what()));
-#endif
+        update_action_states();
     }
 }
 

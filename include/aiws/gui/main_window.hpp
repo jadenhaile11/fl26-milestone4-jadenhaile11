@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <future>
 #include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
 
 #include "aiws/processing_core.hpp"
 #include "aiws/workspace.hpp"
@@ -153,13 +157,36 @@ private:
      */
     void clear_processing_outputs();
 
+    // Runs on the persistent background thread.
+    // Waits for build requests and processes them one at a time.
+    void worker_loop();
+
     Workspace workspace_;
     ProcessingCore processing_core_;
     bool corpus_current_{false};
     ExitCallback exit_callback_{nullptr};
 
-    // M4 background build management.
+    // A build request sent from the GUI to the worker.
+    struct BuildRequest {
+        Workspace snapshot;
+        int delay_ms{0};
+        std::uint64_t revision{0};
+        std::promise<ProcessingCore> promise;
+    };
+
+    // M5 persistent worker thread.
     std::thread build_thread_;
+
+    // Protects pending requests and the shutdown flag.
+    std::mutex worker_mutex_;
+    std::condition_variable worker_cv_;
+    std::optional<BuildRequest> pending_request_;
+    bool stop_worker_{false};
+
+    // Changes whenever running work becomes outdated.
+    std::atomic<std::uint64_t> cancellation_epoch_{0};
+
+    // Existing M4 completion handling.
     std::future<ProcessingCore> build_future_;
     QTimer* build_timer_{nullptr};
 

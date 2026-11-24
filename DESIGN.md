@@ -1,38 +1,66 @@
-# M4 Decision Record
+# M5 Design Note
 
-See specification Section 8.
+1. M4 Fixes
+None of my M4 features needed major bug fixes. However, I changed how background builds work. M4 used a `QTimer` to check for completion, while M5 uses one persistent worker thread that notifies the GUI when it finishes. This also makes cancellation and shutdown easier to handle.
 
-1. Threads and Ownership
+2. Threads and Shared Data
+`MainWindow` and all GUI widgets stay on the Qt main thread. The build worker runs `worker_loop()` and uses a copy of the Workspace. The separate `IpcServer` thread from M4 handles remote document requests.
 
-`MainWindow` and the GUI widgets are kept on the main Qt thread so the application stays responsive. When `build_corpus()` runs, a separate thread builds the corpus using a copy of the Workspace. A `std::future` returns the result, and a `QTimer` checks when it finishes. `IpcServer` also uses its own thread for socket communication. Both threads are joined during cleanup.
+Following Constraint 4, every piece of mutable data shared between threads is protected by a mutex or uses an atomic variable. `worker_mutex_` protects `pending_request_` and `stop_worker_`, which the GUI and worker both access. `cancellation_epoch_` is atomic because both threads read it and the GUI updates it. The request's promise and `build_future_` transfer results safely. `IpcServer` also uses its atomic `stopping_` flag for shutdown. Workspace data, State objects, and widgets stay on the GUI thread.
 
-Constraint 5: The shared `stopping_` variable is written by the main thread and read by the IPC thread. It uses `std::atomic<bool>` to keep this safe. The socket information is set up before the listener starts and cleaned up after it finishes. Build results are passed safely through a promise and future. Workspace data, revisions, and widgets stay on the main thread, while the worker uses its own copy.
+3. State Pattern
+I implemented four State classes to handle the corpus lifecycle.
 
-2. Build Validity
-I used `workspace_revision_` and `build_revision_` to make sure a finished build is still valid. If the workspace changes while a build is running, the numbers will no longer match. Also, when `check_build_completion()` notices this, it discards the outdated result instead of using it.
+State           Meaning               Events and Transitions
 
-3. Changes Since the Checkpoint
-My original design stayed mostly the same, but I added a few things while actually building the application. I implemented the background worker, `QTimer` checking, and workspace revision tracking as planned. I also added error handling so failed builds are reported instead of leaving the application stuck, along with proper thread cleanup when exiting.
+EmptyState      No documents          Add → Dirty
 
-Another change was adding `--build-delay-ms`, which let it simulate a slower build and test whether the GUI stays responsive. Also, the student tests check stale builds, reset behavior, and build failures. Finally, I implemented CR-1 using a separate socket thread so documents can be added remotely without interrupting the GUI. Overall, these changes helped make my original design more reliable and easier to test.
+DirtyState      Documents exist,      Build → Building;
+                corpus outdated       Reset → Empty
 
-4. CR-1 Impact
-For CR-1, I added the IpcServer class with `start()`, `serve()`, and `stop()` to handle communication through a Unix socket. Also created the `aiws_send` program to send document requests and updated `main.cpp` to support the `--ipc-socket` option.
+BuildingState   Build in progress     Success → Ready;
+                                      Failure or Add → Dirty;
+                                      Reset → Empty
 
-When a request comes in, the server checks whether the file is readable and then passes the request to `MainWindow::add_document_file()` through a queued Qt call. This keeps the socket communication separate from the GUI thread and lets me reuse the document-addition logic already implemented. Because of this, no change was necessary to the search widgets or processing backend. Also, the remote additions invalidate the current corpus just like adding a document normally would.
+ReadyState      Corpus is current     Build → Building;
+                                      Add → Dirty;
+                                      Reset → Empty
 
-5. Fault Switches and Tests
-Both fault switches are in `check_build_completion()`.
-    - `AIWS_FAULT_ACCEPT_STALE` is caught by `reject_stale_build()` and `reset_rejects_old_build()`.
-    - `AIWS_FAULT_LOSE_FAILURE` is caught by `build_failure_is_reported()`.
-All 8 normal test results passed and both fault switches caused the expected test failures within 60 seconds.
+Events go through `dispatch_state_event()`, and each State object decides what happens. `update_action_states()` uses these objects to control button availability. Exit ends the application from any state.
 
-6. AI-Use Disclosure
-I used AI, ChatGPT, to help me better understand requirements and how to implement certain parts of the project. It helped with threading concepts, background corpus building, and how they work together. I used it on files such as `main_window.cpp`, `ipc_server.cpp`, and `main.cpp` for figuring out how to approach the edits or formulation of the files. It also helped with developing test cases for the `student_tests.cpp` file, especially for checking stale builds and failed builds as this is not my strongest skill. I reviewed the suggested code snippets, made necessary changes, and tested everything in WSL Ubuntu. Overall, AI definitely helped with understanding implementation and why certain changes were necessary.
+4. Event Sequence
+One situation that could cause problems is resetting during a long build and immediately starting another.
 
-7. Pair Programming Log
-- Partner: Connor Zarra
-- Date: November 8th, 6pm-7pm (Both our codes)
-- During our session, we discussed how Remote Add should work the same way as adding a document normally through the GUI. We agreed that both methods should use `MainWindow::add_document_file()` so they follow the same process and invalidate the current corpus when the workspace changes.
-- Swapped roles every 15 minutes 
-- Communication after a code change was great because it allowed for the both of to see each other's thought processes without being judgemental of the other.
+1. The GUI calls `build_corpus()`, which reaches `start_build_request()` and places a request in `pending_request_`.
+
+2. The worker wakes through `worker_cv_` and begins processing its Workspace copy.
+
+3. The user presses `Reset`. `reset_application()` increments `cancellation_epoch_`, clears the workspace, and changes the state to `Empty`.
+
+4. The worker notices the changed counter and stops processing the outdated build.
+
+5. The user adds another document and requests a new build. The worker processes the newer request.
+
+6. After finishing, the worker notifies the GUI through `QMetaObject::invokeMethod()`. `check_build_completion()` accepts the current result and changes `Building` to `Ready`.
+
+This prevents outdated work from delaying or replacing the newer corpus.
+
+
+5. Three Design Decisions
+Build during a build: The `Building` state does not accept another `Build` request. `BuildingState::request_build()` leaves the running build unchanged.
+
+Remote add mid-build: `IpcServer` forwards the request to `add_document_file()`, which cancels outdated work and invalidates the corpus. The GUI returns to `Dirty`, and the user can rebuild.
+
+Shared data: I kept shared data limited to the pending request, shutdown flag, and cancellation counter. `worker_loop()` uses a Workspace snapshot so the worker does not need direct access to GUI data.
+
+
+6. Fault Switches and Tests
+Both switches are in `main_window.cpp`. `AIWS_FAULT_NO_CANCEL` disables cancellation checks in `worker_loop()` and is caught by `cancelled_build_does_not_delay_replacement()`.
+
+`AIWS_FAULT_SILENT_SHUTDOWN` skips `worker_cv_.notify_one()` in the destructor. The tests detect this through a 30-second shutdown timeout.
+
+All eight tests pass normally, and both faults cause the expected failures.
+
+7. AI-Use Disclosure
+
+I used ChatGPT to better understand threading, cancellation, and the State pattern. It helped me review the implementation of main_window.cpp, develop verification tests, and organize this design note, specifically with writing down the correct classes and functions. I reviewed the code suggestions it made, made edits to them, and tested everything in WSL Ubuntu to make sure everything was correct.

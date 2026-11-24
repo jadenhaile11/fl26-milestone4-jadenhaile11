@@ -8,3 +8,4 @@ build/
 /build-m5/
 /build-m5-no-cancel/
 /build-m5-silent-shutdown/
+/build-m5-docker/

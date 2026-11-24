@@ -4,3 +4,7 @@ build/
 /build/
 /build-stale/
 /build-failure/
+/build-m5-linux/
+/build-m5/
+/build-m5-no-cancel/
+/build-m5-silent-shutdown/

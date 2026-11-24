@@ -248,8 +248,11 @@ MainWindow::~MainWindow() {
         pending_request_.reset();
     }
 
-    // Wakes up the worker if it is waiting for work.
+    // Normal shutdown wakes the worker so it can exit.
+    // Fault mode deliberately omits the notification.
+    #ifndef AIWS_FAULT_SILENT_SHUTDOWN
     worker_cv_.notify_one();
+    #endif
 
     // Waits for the worker to finish before destroying MainWindow.
     if (build_thread_.joinable()) {

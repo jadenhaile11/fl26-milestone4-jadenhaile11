@@ -50,10 +50,10 @@ private:
         for (QLabel* label : window.findChildren<QLabel*>()) {
             const QString text = label->text();
 
-            if (text.startsWith("Build") || text == "Building corpus..." || text == "Application reset.") {
+            if (text.startsWith("Build") || text == "Building corpus..." || text == "Application reset." || text == "Corpus built.") {
                 return text;
+                }
             }
-        }
 
         return QString();
     }
@@ -199,6 +199,67 @@ private slots:
 
         QTRY_VERIFY_WITH_TIMEOUT(application_status(window).startsWith("Build failed:"), 3000);
         QCOMPARE(corpus_status(window), QString("Corpus: Not built"));
+    }
+
+
+    // Cancelling an outdated build lets newer work finish promptly.
+    void cancelled_build_does_not_delay_replacement() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+
+        MainWindow window;
+        window.set_build_delay_ms(500);
+
+        // Starts a slow build with four documents.
+        for (int i = 0; i < 4; ++i) {
+            const QString path = create_file(directory.path(), QString("old_%1.txt").arg(i));
+
+            QVERIFY(!path.isEmpty());
+            QVERIFY(window.add_document_file(path));
+        }
+
+        QVERIFY(start_build(window));
+        QCOMPARE(corpus_status(window), QString("Corpus: Building"));
+
+        // Gives the worker time to begin the outdated build.
+        QTest::qWait(150);
+
+        // Cancels the old build using Reset.
+        QPushButton* reset = nullptr;
+        for (QPushButton* button : window.findChildren<QPushButton*>()) {
+            if (button->text() == "Reset") {
+                reset = button;
+                break;
+            }
+        }
+
+        QVERIFY(reset != nullptr);
+        reset->click();
+
+        // Starts a replacement build with one document.
+        const QString replacement = create_file(directory.path(), "replacement.txt");
+
+        QVERIFY(!replacement.isEmpty());
+        QVERIFY(window.add_document_file(replacement));
+        QVERIFY(start_build(window));
+
+        // The replacement should finish without waiting for the outdated four-document build.
+        QTRY_VERIFY_WITH_TIMEOUT(corpus_status(window).contains("chunks"), 1500);
+
+        QVERIFY(application_status(window).contains("Corpus built"));
+    }
+
+    // An idle worker must shut down when MainWindow is destroyed.
+    void idle_worker_shuts_down() {
+        {
+            MainWindow window;
+
+            // Allows the worker to enter its condition-variable wait.
+            QTest::qWait(150);
+        }
+
+        // Reaching this line means destruction completed.
+        QVERIFY(true);
     }
 };
 
